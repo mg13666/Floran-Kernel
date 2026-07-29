@@ -44,6 +44,12 @@ on:
         type: boolean
         default: true
 
+      native_docker:
+        description: "Enable native Docker kernel support"
+        required: true
+        type: boolean
+        default: true
+
       droidspaces:
         description: "Droidspaces Container Support"
         required: true
@@ -157,6 +163,21 @@ jobs:
           
           # 应用 EVDI DRM 补丁
           patch -p1 -F 3 < ../patch/evdi_drm.patch || true
+
+      - name: Apply native Docker cgroup compatibility patch
+        if: inputs.native_docker && inputs.rom_source != 'YAAP'
+        run: |
+          cd sm8650
+
+          if git apply --reverse --check ../patch/fix_cgroup.patch; then
+            echo "fix_cgroup.patch is already applied"
+          elif git apply --check ../patch/fix_cgroup.patch; then
+            git apply ../patch/fix_cgroup.patch
+            echo "Applied fix_cgroup.patch"
+          else
+            echo "::error::fix_cgroup.patch is incompatible with the selected kernel source"
+            exit 1
+          fi
 
       - name: Fix extract-cert key_pass compatibility
         if: inputs.rom_source != 'YAAP'
@@ -320,10 +341,22 @@ jobs:
             fi
             echo "CONFIG_LOCALVERSION=\"${CUSTOM_NAME}\"" >> arch/arm64/configs/gki_defconfig
             echo "Kernel name set to: ${CUSTOM_NAME}"
+          elif [[ "${{ inputs.native_docker }}" == "true" ]]; then
+            echo 'CONFIG_LOCALVERSION="-Docker"' >> arch/arm64/configs/gki_defconfig
+            echo "Kernel name set to: -Docker"
           fi
 
           make O=out gki_defconfig vendor/pineapple_GKI.config vendor/oplus/pineapple_GKI.config
-          make -j$(nproc) O=out Image
+
+          # Apply the Docker profile only after all vendor config fragments are
+          # merged, otherwise a later fragment can silently disable features.
+          if [[ "${{ inputs.native_docker }}" == "true" ]]; then
+            bash ../tools/enable_native_docker_config.sh out/.config
+            make O=out olddefconfig
+            bash ../tools/verify_native_docker_config.sh out/.config | tee out/native-docker-config.txt
+          fi
+
+          make -j"$(nproc)" O=out Image
 
       - name: Make AnyKernel3
         run: |
@@ -342,14 +375,18 @@ jobs:
           elif [[ "${{ inputs.ksu_type }}" == "None" ]]; then
             ZIP_PREFIX="Non-KSU"
           fi
-          
-          # 添加 Droidspaces 标记
+
+          # 添加容器功能标记
           if [[ "${{ inputs.droidspaces }}" == "standard" ]]; then
             ZIP_PREFIX="${ZIP_PREFIX}-dss"
           elif [[ "${{ inputs.droidspaces }}" == "extended" ]]; then
             ZIP_PREFIX="${ZIP_PREFIX}-dss-ext"
           fi
-          
+
+          if [[ "${{ inputs.native_docker }}" == "true" ]]; then
+            ZIP_PREFIX="${ZIP_PREFIX}-docker"
+          fi
+
           ZIP_NAME="${ZIP_PREFIX}-$(date -u +"%m%d")"
           git clone --depth=1 https://github.com/Kernel-SU/AnyKernel3.git
           cp sm8650/out/arch/arm64/boot/Image AnyKernel3/Image
@@ -361,6 +398,16 @@ jobs:
         with:
           name: Kernel_ZIP
           path: "*.zip"
+
+      - name: Upload native Docker config report
+        if: inputs.native_docker
+        uses: actions/upload-artifact@v6
+        with:
+          name: Native_Docker_Kernel_Config
+          include-hidden-files: true
+          path: |
+            sm8650/out/.config
+            sm8650/out/native-docker-config.txt
 
   release:
     if: inputs.create_release
@@ -401,11 +448,15 @@ jobs:
             KSU_TYPENAME="Non-KSU"
           fi
           
-          # 添加 Droidspaces 信息
+          # 添加容器功能信息
           if [[ "${{ inputs.droidspaces }}" == "standard" ]]; then
             KSU_TYPENAME="${KSU_TYPENAME} + Droidspaces"
           elif [[ "${{ inputs.droidspaces }}" == "extended" ]]; then
             KSU_TYPENAME="${KSU_TYPENAME} + Droidspaces Extended"
+          fi
+
+          if [[ "${{ inputs.native_docker }}" == "true" ]]; then
+            KSU_TYPENAME="${KSU_TYPENAME} + Native Docker"
           fi
           
           echo "KSU_TYPENAME=${KSU_TYPENAME}" >> $GITHUB_ENV
@@ -425,8 +476,9 @@ jobs:
             |---|---|
             | Source | ${{ inputs.rom_source }} |
             | Clang | clang-r563880c |
-            | KernelSU | ${{ env.KSU_TYPENAME }} |
+            | KernelSU / features | ${{ env.KSU_TYPENAME }} |
             | Droidspaces | ${{ inputs.droidspaces }} |
+            | Native Docker kernel support | ${{ inputs.native_docker }} |
             | Built at | ${{ env.TIME_FORM }} |
 
             **Manager downloads:**
