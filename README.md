@@ -26,7 +26,7 @@
   - IPSet 与 IPv6 NAT
   - Droidspaces 容器支持
   - Droidspaces Extended：额外启用虚拟 HCI、systemd-coredump 相关配置及 Lindroid EVDI DRM
-  - 可选原生 Docker 内核功能：补齐 cgroup、namespace、bridge/netfilter、IPVS、macvlan/ipvlan、VXLAN 与 overlayfs 等配置，并严格校验最终 `.config`
+  - 可选最小 rootful 原生 Docker 内核功能：补齐普通 `dockerd + overlay2 + bridge/iptables` 所需配置，并严格校验最终 `.config`
 - 使用 AOSP Clang `r563880c` 编译
 - 通过 AnyKernel3 输出可刷写 ZIP
 - 支持上传 Actions Artifact，并可自动创建 GitHub Release
@@ -52,7 +52,7 @@
 | `Enable lz4 1.10.0 patch` | 为非 YAAP 源码应用 LZ4 1.10.0 补丁。 |
 | `Enable IPSET & IPv6_NAT` | 启用 IPSet、IPv6 NAT 及相关 Netfilter 配置。 |
 | `Enable BBR & ECN` | 启用 BBR、ECN 与 FQ。 |
-| `Enable native Docker kernel support` | 在所有 vendor 配置合并后启用并校验原生 Docker 所需内核功能；默认开启。 |
+| `Enable minimal rootful native Docker support` | 在所有 vendor 配置合并后启用并校验最小 rootful Docker 内核功能；默认关闭。 |
 | `Droidspaces Container Support` | 选择 `none`、`standard` 或 `extended` 容器支持。YAAP 源码不会应用 Droidspaces 补丁。 |
 | `Custom Kernel Name` | 设置内核附加版本名。脚本会自动补上 `-` 前缀。 |
 | `创建 GitHub Release？` | 是否在构建成功后创建并上传 GitHub Release。 |
@@ -103,35 +103,37 @@
 > [!NOTE]
 > Droidspaces 补丁仅会应用于非 YAAP 源码。
 
-## 原生 Docker 内核支持
+## 最小 rootful 原生 Docker 支持
 
-启用 `Enable native Docker kernel support` 后，工作流会在 GKI 与 vendor 配置全部合并之后：
+启用 `Enable minimal rootful native Docker support` 后，工作流会在 GKI 与 vendor 配置全部合并之后：
 
-1. 严格应用 `patch/fix_cgroup.patch`（非 YAAP 源码），恢复 Android `noprefix` cgroup 与标准 Linux 文件名的兼容性；
-2. 通过 `tools/enable_native_docker_config.sh` 启用 Docker、containerd、runc、Swarm 与可选 IPVS 所需配置；
+1. 不修改 cgroup 源码，也不应用 `patch/fix_cgroup.patch`；
+2. 通过 `tools/enable_native_docker_config.sh` 只启用 rootful `dockerd + containerd + runc`、`overlay2` 和普通 bridge/iptables 网络所需的内核能力；
 3. 运行 `olddefconfig` 解析 Kconfig 依赖；
-4. 通过 `tools/verify_native_docker_config.sh` 检查最终配置。任何必需选项未解析为内建 `=y` 时，构建会直接失败；
-5. 上传 `Native_Docker_Kernel_Config` Artifact，内含最终 `.config` 与验证报告。
+4. 通过 `tools/verify_native_docker_config.sh` 严格检查最终配置。任何必需选项未解析为内建 `=y` 时，构建会直接失败；
+5. 上传 `Minimal_Rootful_Docker_Kernel_Config` Artifact，内含最终 `.config` 与验证报告。
+
+该最小 profile 不主动启用 `USER_NS`、`CFS_BANDWIDTH`、cgroup perf/hugetlb、nftables、IPVS、macvlan/ipvlan、VXLAN 或 Swarm overlay 网络。对应地，它不承诺 rootless Docker、CPU quota、hugetlb 限制、Kubernetes/IPVS 或 Swarm 功能。
 
 > [!IMPORTANT]
-> 此选项只补齐**内核能力**。Android 默认可能将 `cpu`、`cpuset`、`blkio` 与 `memory` 分散在 cgroup v1/v2 层级；要完整运行 Docker，还需要与当前 ROM 匹配的 early-init cgroup 挂载配置、真实 chroot 用户空间以及 SELinux 策略。不要在启动后的 Android 根命名空间中强制卸载或重挂现有 cgroup。
+> 此选项只验证**内核配置闭环**。Android 默认可能将 `cpu`、`cpuset`、`blkio` 与 `memory` 分散在 cgroup v1/v2 层级；真正完成原生 Docker 还必须在实机启动后验证 cgroup 挂载、SELinux、原生 arm64 chroot 用户空间，以及 `containerd`、`runc`、`dockerd` 和 `docker run`。不要在启动后的 Android 根命名空间中强制卸载或重挂现有 cgroup。
 
 > [!WARNING]
-> `CONFIG_USER_NS` 与完整容器网络会增加内核攻击面。仅向可信应用授予 root/KernelSU 权限，并保留可刷回的内核和系统镜像。
+> 此前一次性启用 61 项的宽 profile 已在 `giuliac` / LineageOS 23.2 实机卡第一屏重启，不应再次刷入。每次测试新内核前必须备份当前活动槽的 `boot` 分区，并保留可用的 fastboot 回退路径。详细边界和验收标准见 [`docs/NATIVE_DOCKER.md`](docs/NATIVE_DOCKER.md)。
 
 ## 输出文件命名
 
 单独构建的 ZIP 大致遵循：
 
 ```text
-<KSU 方案>[-dss|-dss-ext][-docker]-<UTC 月日>.zip
+<KSU 方案>[-dss|-dss-ext][-docker-minimal]-<UTC 月日>.zip
 ```
 
 其中：
 
 - `dss`：Droidspaces Standard
 - `dss-ext`：Droidspaces Extended
-- `docker`：启用原生 Docker 内核功能并通过最终配置校验
+- `docker-minimal`：启用最小 rootful 原生 Docker 内核功能并通过最终配置校验
 
 ## 本地构建
 

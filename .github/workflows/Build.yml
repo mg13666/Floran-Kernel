@@ -45,10 +45,10 @@ on:
         default: true
 
       native_docker:
-        description: "Enable native Docker kernel support"
+        description: "Enable minimal rootful native Docker support"
         required: true
         type: boolean
-        default: true
+        default: false
 
       droidspaces:
         description: "Droidspaces Container Support"
@@ -164,21 +164,9 @@ jobs:
           # 应用 EVDI DRM 补丁
           patch -p1 -F 3 < ../patch/evdi_drm.patch || true
 
-      - name: Apply native Docker cgroup compatibility patch
-        if: inputs.native_docker && inputs.rom_source != 'YAAP'
-        run: |
-          cd sm8650
-
-          if git apply --reverse --check ../patch/fix_cgroup.patch; then
-            echo "fix_cgroup.patch is already applied"
-          elif git apply --check ../patch/fix_cgroup.patch; then
-            git apply ../patch/fix_cgroup.patch
-            echo "Applied fix_cgroup.patch"
-          else
-            echo "::error::fix_cgroup.patch is incompatible with the selected kernel source"
-            exit 1
-          fi
-
+      # The minimal rootful Docker profile intentionally does not apply
+      # patch/fix_cgroup.patch. Keep the kernel source identical to the
+      # boot-tested Floran/LineageOS path for this first reduced profile.
       - name: Fix extract-cert key_pass compatibility
         if: inputs.rom_source != 'YAAP'
         run: |
@@ -375,9 +363,6 @@ jobs:
             fi
             echo "CONFIG_LOCALVERSION=\"${CUSTOM_NAME}\"" >> arch/arm64/configs/gki_defconfig
             echo "Kernel name set to: ${CUSTOM_NAME}"
-          elif [[ "${{ inputs.native_docker }}" == "true" ]]; then
-            echo 'CONFIG_LOCALVERSION="-Docker"' >> arch/arm64/configs/gki_defconfig
-            echo "Kernel name set to: -Docker"
           fi
 
           make O=out gki_defconfig vendor/pineapple_GKI.config vendor/oplus/pineapple_GKI.config
@@ -428,7 +413,7 @@ jobs:
           fi
 
           if [[ "${{ inputs.native_docker }}" == "true" ]]; then
-            ZIP_PREFIX="${ZIP_PREFIX}-docker"
+            ZIP_PREFIX="${ZIP_PREFIX}-docker-minimal"
           fi
 
           ZIP_NAME="${ZIP_PREFIX}-$(date -u +"%m%d")"
@@ -451,11 +436,11 @@ jobs:
             sm8650/out/.config
             sm8650/out/kernelsu-config.txt
 
-      - name: Upload native Docker config report
+      - name: Upload minimal rootful Docker config report
         if: inputs.native_docker
         uses: actions/upload-artifact@v6
         with:
-          name: Native_Docker_Kernel_Config
+          name: Minimal_Rootful_Docker_Kernel_Config
           include-hidden-files: true
           path: |
             sm8650/out/.config
@@ -509,7 +494,7 @@ jobs:
           fi
 
           if [[ "${{ inputs.native_docker }}" == "true" ]]; then
-            KSU_TYPENAME="${KSU_TYPENAME} + Native Docker"
+            KSU_TYPENAME="${KSU_TYPENAME} + Minimal Rootful Docker"
           fi
           
           echo "KSU_TYPENAME=${KSU_TYPENAME}" >> $GITHUB_ENV
@@ -531,7 +516,7 @@ jobs:
             | Clang | clang-r563880c |
             | KernelSU / features | ${{ env.KSU_TYPENAME }} |
             | Droidspaces | ${{ inputs.droidspaces }} |
-            | Native Docker kernel support | ${{ inputs.native_docker }} |
+            | Minimal rootful Docker kernel support | ${{ inputs.native_docker }} |
             | Built at | ${{ env.TIME_FORM }} |
 
             **Manager downloads:**
