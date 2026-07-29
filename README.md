@@ -82,7 +82,9 @@
 | `ReSukiSU-susfs` | ReSukiSU + SUSFS |
 | `None` | 不集成 KernelSU |
 
-选择带 `susfs` 的方案时，工作流会拉取 `susfs4ksu` 的 `gki-android14-6.1` 分支，并启用 SUSFS 相关配置。
+选择带 `susfs` 的方案时，工作流会拉取 `susfs4ksu` 的 `gki-android14-6.1` 分支，并启用 SUSFS 相关配置。SUSFS 补丁只允许已知的 LineageOS `fs/namespace.c` include 差异由兼容逻辑修复；其他 reject 均会终止构建。
+
+所有 GKI 与 vendor 配置合并后，工作流会通过 `tools/enable_kernelsu_config.sh` 重新应用所选 KernelSU profile，运行 `olddefconfig`，再由 `tools/verify_kernelsu_config.sh` 检查最终 `.config`。选择 ReSukiSU 时会强制检查多管理器支持；选择任何 `-susfs` 方案时，全部 SUSFS 关键配置必须最终解析为内建 `=y`，否则不会生成一个名称与实际功能不符的刷机包。最终 `.config` 与校验报告会上传到 `KernelSU_Kernel_Config` Artifact。
 
 刷入集成 KernelSU 的内核后，请安装与所选方案相对应的管理器：
 

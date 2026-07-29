@@ -215,6 +215,8 @@ jobs:
 
       - name: Compile Kernel
         run: |
+          set -euo pipefail
+
           CLANG_ROOT="${GITHUB_WORKSPACE}/toolchains/clang-r563880c/bin"
           export PATH="${CLANG_ROOT}:$PATH"
           export ARCH=arm64
@@ -237,49 +239,81 @@ jobs:
           elif [[ "${{ inputs.ksu_type }}" == ReSukiSU* ]]; then
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
           fi
-          
-          if [[ "${{ inputs.ksu_type }}" == *susfs ]]; then
-            git clone -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs
-            cd susfs
-            cp ./kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ..
-            cp ./kernel_patches/fs/* ../fs/
-            cp ./kernel_patches/include/linux/* ../include/linux/
-            cd ..
-            
-            patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
+          if [[ "${{ inputs.ksu_type }}" == *-susfs ]]; then
+            git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs
+            cp susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch .
+            cp susfs/kernel_patches/fs/* fs/
+            cp susfs/kernel_patches/include/linux/* include/linux/
 
-            if [ -f fs/namespace.c ] && ! grep -q "linux/susfs_def.h" fs/namespace.c; then
-              echo "正在修复SUSFS"
-              
-              sed -i '/extern bool susfs_is_sdcard_android_data_decrypted/d' ./fs/namespace.c
-              sed -i '/extern bool susfs_is_current_ksu_domain/d' ./fs/namespace.c
-              echo '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT' > /tmp/susfs_fix.txt
-              echo '#include <linux/susfs_def.h>' >> /tmp/susfs_fix.txt
-              echo 'extern bool susfs_is_current_ksu_domain(void);' >> /tmp/susfs_fix.txt
-              echo 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;' >> /tmp/susfs_fix.txt
-              echo '' >> /tmp/susfs_fix.txt
-              echo '#ifndef CL_COPY_MNT_NS' >> /tmp/susfs_fix.txt
-              echo '#define CL_COPY_MNT_NS BIT(25)' >> /tmp/susfs_fix.txt
-              echo '#endif' >> /tmp/susfs_fix.txt
-              echo '#endif' >> /tmp/susfs_fix.txt
-              sed -i '/#include "internal.h"/r /tmp/susfs_fix.txt' ./fs/namespace.c
-              rm -f /tmp/susfs_fix.txt
-              echo "SUSFS修复完成"
+            # Official/Next trees do not always carry the KernelSU-side SUSFS
+            # integration. Apply it only when the selected tree lacks the
+            # Kconfig entry; ReSukiSU already contains this integration.
+            KSU_KERNEL_DIR="$(readlink -f drivers/kernelsu)"
+            KSU_ROOT="$(dirname "${KSU_KERNEL_DIR}")"
+            if [[ ! -f "${KSU_KERNEL_DIR}/Kconfig" ]]; then
+              echo "::error::Unable to locate the integrated KernelSU Kconfig"
+              exit 1
             fi
+            if ! grep -q '^config KSU_SUSFS$' "${KSU_KERNEL_DIR}/Kconfig"; then
+              patch --batch --forward -d "${KSU_ROOT}" -p1 \
+                < susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+            fi
+            grep -q '^config KSU_SUSFS$' "${KSU_KERNEL_DIR}/Kconfig"
+
+            # The LineageOS tree differs in the first fs/namespace.c include
+            # hunk. Permit only that one known reject and repair it below;
+            # every other rejected hunk is a hard failure.
+            if patch --batch --forward -p1 \
+                < 50_add_susfs_in_gki-android14-6.1.patch; then
+              echo "Applied the SUSFS kernel patch cleanly"
+            else
+              mapfile -t rejects < <(find . -type f -name '*.rej' -print)
+              if (( ${#rejects[@]} == 1 )) \
+                  && [[ "${rejects[0]}" == "./fs/namespace.c.rej" ]] \
+                  && [[ "$(grep -c '^@@ ' "${rejects[0]}")" -eq 1 ]] \
+                  && grep -q 'linux/susfs_def.h' "${rejects[0]}" \
+                  && grep -q 'susfs_is_current_ksu_domain' "${rejects[0]}"; then
+                echo "Applying the validated LineageOS fs/namespace.c compatibility repair"
+              else
+                echo "::error::Unexpected SUSFS patch rejection"
+                for reject in "${rejects[@]}"; do
+                  echo "--- ${reject}"
+                  cat "${reject}"
+                done
+                exit 1
+              fi
+            fi
+
+            if ! grep -q 'linux/susfs_def.h' fs/namespace.c; then
+              sed -i '/extern bool susfs_is_sdcard_android_data_decrypted/d' fs/namespace.c
+              sed -i '/extern bool susfs_is_current_ksu_domain/d' fs/namespace.c
+              cat > /tmp/susfs_namespace_compat.txt <<'EOF'
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+          #include <linux/susfs_def.h>
+          extern bool susfs_is_current_ksu_domain(void);
+          extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+
+          #ifndef CL_COPY_MNT_NS
+          #define CL_COPY_MNT_NS BIT(25)
+          #endif
+          #endif
+          EOF
+              sed -i '/#include "internal.h"/r /tmp/susfs_namespace_compat.txt' fs/namespace.c
+              rm -f /tmp/susfs_namespace_compat.txt
+            fi
+
+            rm -f fs/namespace.c.rej fs/namespace.c.orig
+            if find . -type f -name '*.rej' -print -quit | grep -q .; then
+              echo "::error::SUSFS patch left unresolved reject files"
+              find . -type f -name '*.rej' -print
+              exit 1
+            fi
+            grep -q 'linux/susfs_def.h' fs/namespace.c
+            grep -qF 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+            test -s fs/susfs.c
+            test -s include/linux/susfs_def.h
           fi
 
-         
-          if [[ "${{ inputs.ksu_type }}" == *susfs ]]; then
-            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/gki_defconfig
-          fi
 
           touch ./.scmversion
           sed -i "s|CONFIG_MODULE_SIG_PROTECT=y|CONFIG_MODULE_SIG_PROTECT=n|" arch/arm64/configs/gki_defconfig
@@ -348,12 +382,22 @@ jobs:
 
           make O=out gki_defconfig vendor/pineapple_GKI.config vendor/oplus/pineapple_GKI.config
 
-          # Apply the Docker profile only after all vendor config fragments are
-          # merged, otherwise a later fragment can silently disable features.
+          # Apply feature profiles only after all vendor fragments are merged;
+          # otherwise a later fragment can silently disable requested options.
+          bash ../tools/enable_kernelsu_config.sh \
+            out/.config "${{ inputs.ksu_type }}"
           if [[ "${{ inputs.native_docker }}" == "true" ]]; then
             bash ../tools/enable_native_docker_config.sh out/.config
-            make O=out olddefconfig
-            bash ../tools/verify_native_docker_config.sh out/.config | tee out/native-docker-config.txt
+          fi
+
+          make O=out olddefconfig
+
+          bash ../tools/verify_kernelsu_config.sh \
+            out/.config "${{ inputs.ksu_type }}" \
+            | tee out/kernelsu-config.txt
+          if [[ "${{ inputs.native_docker }}" == "true" ]]; then
+            bash ../tools/verify_native_docker_config.sh out/.config \
+              | tee out/native-docker-config.txt
           fi
 
           make -j"$(nproc)" O=out Image
@@ -398,6 +442,14 @@ jobs:
         with:
           name: Kernel_ZIP
           path: "*.zip"
+      - name: Upload KernelSU config report
+        uses: actions/upload-artifact@v6
+        with:
+          name: KernelSU_Kernel_Config
+          include-hidden-files: true
+          path: |
+            sm8650/out/.config
+            sm8650/out/kernelsu-config.txt
 
       - name: Upload native Docker config report
         if: inputs.native_docker
@@ -408,6 +460,7 @@ jobs:
           path: |
             sm8650/out/.config
             sm8650/out/native-docker-config.txt
+
 
   release:
     if: inputs.create_release
